@@ -7,8 +7,15 @@ Sem banco de dados e sem dependências: Python puro + uma página HTML.
 ## Arquivos
 
 - `app.py` – coleta as métricas a cada 5 s, guarda 1 hora de histórico em memória e serve a página e a API
-- `index.html` – a página com os gráficos e a tabela de aplicativos
+- `index.html` – a página: mostradores, gráficos, lista de aplicativos e alertas, em 3 temas de cores
 - `Dockerfile` – imagem para rodar no EasyPanel
+
+## Temas de cores
+
+As bolinhas no canto superior direito da página trocam o tema: **ciano** (verde-azulado, estilo HUD),
+**neon** (magenta, violeta e laranja) e **ciber** (azul, violeta e rosa). A escolha fica salva no
+navegador de quem abriu a página. A fonte (Barlow) vem do Google Fonts; se o navegador não conseguir
+carregá-la, a página usa a fonte padrão do sistema e continua funcionando.
 
 ## Deploy no EasyPanel
 
