@@ -39,6 +39,19 @@
   .bar { height: 8px; border-radius: 99px; background: var(--line); margin-top: 14px; overflow: hidden; }
   .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 99px; transition: width .4s; }
   footer { margin-top: 20px; font-size: 12px; color: var(--muted); text-align: center; }
+  .apps { margin-top: 16px; }
+  .apps h2 { margin-bottom: 10px; }
+  .note { font-size: 13px; color: var(--muted); margin-bottom: 8px; line-height: 1.5; }
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px 10px;
+       border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 10px; border-bottom: 1px solid var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: 0; }
+  .proj { color: var(--muted); }
+  .app-name { font-weight: 600; }
+  .spark { stroke: var(--accent); fill: none; stroke-width: 1.5; vertical-align: middle; }
+  .pill.warn { background: var(--badbg); color: var(--bad); }
 </style>
 </head>
 <body>
@@ -93,6 +106,19 @@
       <div class="bar"><i id="swap-bar" style="width:0"></i></div>
     </div>
   </div>
+
+  <section class="card apps" id="apps-card" hidden>
+    <h2>Aplicativos (EasyPanel)</h2>
+    <div class="note" id="apps-note" hidden></div>
+    <div class="tablewrap">
+      <table id="apps-table" hidden>
+        <thead>
+          <tr><th>Aplicativo</th><th>Status</th><th>CPU</th><th>Memória</th><th>Rede ↓ / ↑</th><th>CPU (10 min)</th></tr>
+        </thead>
+        <tbody id="apps-body"></tbody>
+      </table>
+    </div>
+  </section>
 
   <footer>Atualiza a cada poucos segundos · histórico da última hora · totais de rede contados desde o último boot</footer>
 </div>
@@ -198,7 +224,87 @@ async function poll() {
   if (lastOk) $('updated').textContent = 'Atualizado às ' + new Date(lastOk).toLocaleTimeString('pt-BR');
   setTimeout(poll, pollMs);
 }
+const STATE_PT = { running: 'Rodando', exited: 'Parado', restarting: 'Reiniciando',
+                   paused: 'Pausado', created: 'Criado', dead: 'Morto' };
+
+function sparkSvg(vals) {
+  const w = 90, h = 24;
+  if (!vals.length) return '';
+  const max = Math.max(5, ...vals);
+  const step = vals.length > 1 ? w / (vals.length - 1) : w;
+  const pts = vals.map((v, i) =>
+    (i * step).toFixed(1) + ',' + (h - 2 - (v / max) * (h - 4)).toFixed(1)).join(' ');
+  return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h +
+         '"><polyline class="spark" points="' + pts + '"/></svg>';
+}
+
+function cell(tr, text, cls) {
+  const td = document.createElement('td');
+  if (cls) td.className = cls;
+  td.textContent = text;
+  tr.appendChild(td);
+  return td;
+}
+
+function renderApps(d) {
+  $('apps-card').hidden = false;
+  const note = $('apps-note'), table = $('apps-table'), body = $('apps-body');
+  if (!d.enabled) {
+    note.hidden = false;
+    note.textContent = 'Docker não conectado. Veja no README como liberar o acesso aos aplicativos do EasyPanel.';
+    table.hidden = true;
+    return;
+  }
+  note.hidden = !d.error;
+  note.textContent = d.error ? 'Não consegui falar com o Docker: ' + d.error : '';
+  table.hidden = !d.apps.length;
+  body.replaceChildren();
+  for (const a of d.apps) {
+    const tr = document.createElement('tr');
+
+    const name = document.createElement('td');
+    if (a.project) {
+      const p = document.createElement('span');
+      p.className = 'proj';
+      p.textContent = a.project + ' / ';
+      name.appendChild(p);
+    }
+    const s = document.createElement('span');
+    s.className = 'app-name';
+    s.textContent = a.service + (a.replicas > 1 ? ' ×' + a.replicas : '');
+    name.appendChild(s);
+    tr.appendChild(name);
+
+    const st = document.createElement('td');
+    const pill = document.createElement('span');
+    pill.className = 'pill' + (a.state === 'running' ? '' : ' warn');
+    pill.textContent = STATE_PT[a.state] || a.state;
+    pill.title = a.status || '';
+    st.appendChild(pill);
+    tr.appendChild(st);
+
+    cell(tr, a.cpu.toFixed(1) + '%');
+    cell(tr, fmtBytes(a.mem_used) + (a.mem_limit ? ' / ' + fmtBytes(a.mem_limit) : ''));
+    cell(tr, '↓ ' + fmtRate(a.rx) + '  ·  ↑ ' + fmtRate(a.tx));
+    const sp = document.createElement('td');
+    sp.innerHTML = sparkSvg(a.cpu_hist || []);
+    tr.appendChild(sp);
+
+    body.appendChild(tr);
+  }
+}
+
+async function pollApps() {
+  try {
+    const r = await fetch('/api/apps', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    renderApps(await r.json());
+  } catch (e) { /* tenta de novo no próximo ciclo */ }
+  setTimeout(pollApps, Math.max(pollMs, 5000));
+}
+
 poll();
+pollApps();
 </script>
 </body>
 </html>

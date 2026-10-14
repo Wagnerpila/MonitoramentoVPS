@@ -3,16 +3,21 @@
 
 Lê CPU, memória, disco e rede direto do Linux (/proc e /sys), guarda um
 histórico em memória e serve a página (index.html) e a API (/api/metrics).
+Se o Docker estiver acessível, também mostra CPU, memória e rede de cada
+aplicativo (container) do EasyPanel em /api/apps.
 Só usa a biblioteca padrão do Python.
 """
 import base64
 import hmac
+import http.client
 import json
 import os
 import shutil
+import socket
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -146,6 +151,178 @@ def sampler():
         time.sleep(max(INTERVAL - (time.time() - now), 0.5))
 
 
+# ---------- aplicativos (containers Docker do EasyPanel) ----------
+# DOCKER_HOST pode ser:
+#   unix:///var/run/docker.sock   (socket montado direto no container)
+#   tcp://nome-do-proxy:2375      (recomendado: docker-socket-proxy somente leitura)
+DOCKER_HOST = os.getenv("DOCKER_HOST", "").strip()
+if not DOCKER_HOST and os.path.exists("/var/run/docker.sock"):
+    DOCKER_HOST = "unix:///var/run/docker.sock"
+DOCKER_ENABLED = bool(DOCKER_HOST)
+APP_HISTORY = 120  # pontos de CPU por app para o mini gráfico (120 x 5 s = 10 min)
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """HTTP por cima de um socket Unix (para falar com /var/run/docker.sock)."""
+
+    def __init__(self, path, timeout=8):
+        super().__init__("localhost", timeout=timeout)
+        self._unix_path = path
+
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(self.timeout)
+        s.connect(self._unix_path)
+        self.sock = s
+
+
+def docker_get(path):
+    if DOCKER_HOST.startswith("tcp://"):
+        host, _, port = DOCKER_HOST[6:].rstrip("/").partition(":")
+        conn = http.client.HTTPConnection(host, int(port or 2375), timeout=8)
+    else:
+        sock_path = DOCKER_HOST[7:] if DOCKER_HOST.startswith("unix://") else DOCKER_HOST
+        conn = UnixHTTPConnection(sock_path)
+    try:
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        body = resp.read()
+        if resp.status != 200:
+            raise RuntimeError(f"a API do Docker respondeu {resp.status}")
+        return json.loads(body)
+    finally:
+        conn.close()
+
+
+apps_state = {"enabled": DOCKER_ENABLED, "error": None, "t": 0, "apps": []}
+apps_lock = threading.Lock()
+_prev = {}      # id do container -> (cpu_total, sys_total, rx, tx, instante)
+_app_hist = {}  # nome do serviço -> deque com o CPU% recente
+
+
+def app_name(c):
+    """Nome do serviço. No EasyPanel é 'projeto_servico' (ex.: evolution_monitoramento)."""
+    labels = c.get("Labels") or {}
+    name = labels.get("com.docker.swarm.service.name")
+    if not name:
+        name = (c.get("Names") or ["/?"])[0].lstrip("/")
+    return name
+
+
+def safe_stats(cid):
+    try:
+        return docker_get(f"/containers/{cid}/stats?stream=false&one-shot=true")
+    except Exception:
+        return None
+
+
+def container_numbers(cid, st, now, host_mem):
+    cs = st.get("cpu_stats", {})
+    cpu_total = cs.get("cpu_usage", {}).get("total_usage", 0)
+    sys_total = cs.get("system_cpu_usage", 0)
+    ncpu = (cs.get("online_cpus")
+            or len(cs.get("cpu_usage", {}).get("percpu_usage") or [])
+            or os.cpu_count() or 1)
+    nets = (st.get("networks") or {}).values()
+    rx = sum(n.get("rx_bytes", 0) for n in nets)
+    tx = sum(n.get("tx_bytes", 0) for n in nets)
+
+    cpu_pct = rx_rate = tx_rate = 0.0
+    prev = _prev.get(cid)
+    if prev:
+        dt = max(now - prev[4], 0.001)
+        d_cpu, d_sys = cpu_total - prev[0], sys_total - prev[1]
+        if d_sys > 0 and d_cpu >= 0:
+            cpu_pct = d_cpu / d_sys * ncpu * 100
+        rx_rate = max(rx - prev[2], 0) / dt
+        tx_rate = max(tx - prev[3], 0) / dt
+    _prev[cid] = (cpu_total, sys_total, rx, tx, now)
+
+    ms = st.get("memory_stats", {})
+    mstats = ms.get("stats", {})
+    cache = mstats.get("inactive_file", mstats.get("total_inactive_file", mstats.get("cache", 0)))
+    mem_used = max(ms.get("usage", 0) - cache, 0)
+    limit = ms.get("limit") or 0
+    mem_limit = limit if 0 < limit < host_mem * 0.98 else None  # sem limite = mostra só o uso
+    return cpu_pct, mem_used, mem_limit, rx_rate, tx_rate
+
+
+def sample_apps():
+    now = time.time()
+    containers = docker_get("/containers/json?all=1")
+    running = [c for c in containers if c.get("State") == "running"]
+    ids = [c["Id"] for c in running]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        stats = dict(zip(ids, ex.map(safe_stats, ids)))
+    for cid in list(_prev):
+        if cid not in stats:
+            del _prev[cid]
+    host_mem = read_mem()[0]
+
+    groups = {}
+    for c in containers:
+        g = groups.setdefault(app_name(c), {
+            "running": 0, "states": [], "status": "", "cpu": 0.0,
+            "mem_used": 0, "mem_limit": None, "rx": 0.0, "tx": 0.0,
+        })
+        if c.get("State") == "running":
+            g["running"] += 1
+            g["status"] = c.get("Status", "")
+            st = stats.get(c["Id"])
+            if st:
+                cpu, mem, lim, rx, tx = container_numbers(c["Id"], st, now, host_mem)
+                g["cpu"] += cpu
+                g["mem_used"] += mem
+                g["rx"] += rx
+                g["tx"] += tx
+                if lim:
+                    g["mem_limit"] = (g["mem_limit"] or 0) + lim
+        else:
+            g["states"].append(c.get("State", "?"))
+            if not g["running"] and not g["status"]:
+                g["status"] = c.get("Status", "")
+
+    apps = []
+    for key, g in groups.items():
+        hist = _app_hist.setdefault(key, deque(maxlen=APP_HISTORY))
+        hist.append(round(g["cpu"], 1))
+        project, _, service = key.partition("_")
+        if not service:
+            project, service = "", key
+        apps.append({
+            "key": key,
+            "project": project,
+            "service": service,
+            "replicas": g["running"],
+            "state": "running" if g["running"] else (g["states"][0] if g["states"] else "unknown"),
+            "status": g["status"],
+            "cpu": round(g["cpu"], 1),
+            "mem_used": g["mem_used"],
+            "mem_limit": g["mem_limit"],
+            "rx": round(g["rx"]),
+            "tx": round(g["tx"]),
+            "cpu_hist": list(hist),
+        })
+    for key in list(_app_hist):
+        if key not in groups:
+            del _app_hist[key]
+    apps.sort(key=lambda a: a["mem_used"], reverse=True)
+    return apps
+
+
+def apps_loop():
+    while True:
+        t0 = time.time()
+        try:
+            apps = sample_apps()
+            with apps_lock:
+                apps_state.update(apps=apps, error=None, t=int(time.time()))
+        except Exception as e:
+            with apps_lock:
+                apps_state.update(error=f"{type(e).__name__}: {e}")
+        time.sleep(max(INTERVAL - (time.time() - t0), 1))
+
+
 # ---------- servidor HTTP ----------
 class Handler(BaseHTTPRequestHandler):
     server_version = "VPSMonitor/1.0"
@@ -199,10 +376,18 @@ class Handler(BaseHTTPRequestHandler):
                 payload = {"now": dict(latest), "history": pts, "interval": INTERVAL}
             return self._send(200, json.dumps(payload).encode(), "application/json")
 
+        if url.path == "/api/apps":
+            with apps_lock:
+                payload = json.dumps(apps_state).encode()
+            return self._send(200, payload, "application/json")
+
         self._send(404, b"Nao encontrado", "text/plain; charset=utf-8")
 
 
 if __name__ == "__main__":
     threading.Thread(target=sampler, daemon=True).start()
+    if DOCKER_ENABLED:
+        threading.Thread(target=apps_loop, daemon=True).start()
     print(f"Monitor rodando na porta {PORT} (coleta a cada {INTERVAL}s)", flush=True)
+    print(f"Docker: {DOCKER_HOST or 'nao configurado (tabela de aplicativos desativada)'}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
