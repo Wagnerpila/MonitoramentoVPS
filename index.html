@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor da VPS</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f5f9; --card: #ffffff; --text: #1d1e20; --muted: #6d7081;
+    --line: #e4e6ee; --accent: #673de6; --ok: #008361; --okbg: #e0f6f0; --bad: #d63163;
+    --badbg: #fde8ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1020; --card: #1a1b2e; --text: #f1f2f8; --muted: #9a9db5;
+      --line: #2b2d45; --accent: #8c6cff; --ok: #4fd1a5; --okbg: #12332b;
+      --bad: #ff6b93; --badbg: #3a1a26;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 99px; background: var(--okbg); color: var(--ok); font-weight: 600; }
+  .pill.off { background: var(--badbg); color: var(--bad); }
+  .meta { margin-left: auto; color: var(--muted); font-size: 13px; text-align: right; }
+  .info { display: flex; gap: 24px; flex-wrap: wrap; background: var(--card); border: 1px solid var(--line);
+          border-radius: 14px; padding: 14px 20px; margin-bottom: 16px; font-size: 14px; color: var(--muted); }
+  .info b { color: var(--text); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+  .card h2 { margin: 0 0 4px; font-size: 14px; font-weight: 500; color: var(--muted); }
+  .value { font-size: 28px; font-weight: 700; }
+  .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .chart { height: 90px; margin-top: 10px; position: relative; }
+  .bar { height: 8px; border-radius: 99px; background: var(--line); margin-top: 14px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 99px; transition: width .4s; }
+  footer { margin-top: 20px; font-size: 12px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="title">Monitor da VPS</h1>
+    <span class="pill" id="status">conectando…</span>
+    <div class="meta" id="updated">—</div>
+  </header>
+
+  <div class="info">
+    <span>Uptime: <b id="uptime">—</b></span>
+    <span>Load (1/5/15 min): <b id="load">—</b></span>
+    <span>vCPUs: <b id="cpus">—</b></span>
+    <span>Interface de rede: <b id="ifaces">—</b></span>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Uso da CPU</h2>
+      <div class="value" id="cpu">—</div>
+      <div class="chart"><canvas id="c-cpu"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>Uso de memória</h2>
+      <div class="value" id="mem">—</div>
+      <div class="sub" id="mem-sub">—</div>
+      <div class="chart"><canvas id="c-mem"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>Uso do disco</h2>
+      <div class="value" id="disk">—</div>
+      <div class="sub" id="disk-sub">—</div>
+      <div class="bar"><i id="disk-bar" style="width:0"></i></div>
+    </div>
+    <div class="card">
+      <h2>Tráfego de entrada</h2>
+      <div class="value" id="rx">—</div>
+      <div class="sub" id="rx-sub">—</div>
+      <div class="chart"><canvas id="c-rx"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>Tráfego de saída</h2>
+      <div class="value" id="tx">—</div>
+      <div class="sub" id="tx-sub">—</div>
+      <div class="chart"><canvas id="c-tx"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>Swap</h2>
+      <div class="value" id="swap">—</div>
+      <div class="sub" id="swap-sub">—</div>
+      <div class="bar"><i id="swap-bar" style="width:0"></i></div>
+    </div>
+  </div>
+
+  <footer>Atualiza a cada poucos segundos · histórico da última hora · totais de rede contados desde o último boot</footer>
+</div>
+
+<script>
+const MAX_POINTS = 720;
+const hist = [];
+let since = 0, lastOk = 0, pollMs = 5000;
+
+const $ = id => document.getElementById(id);
+const fmtBytes = b => {
+  const u = ['B','KB','MB','GB','TB']; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return b.toFixed(i < 2 ? 0 : 1) + ' ' + u[i];
+};
+const fmtRate = b => fmtBytes(b) + '/s';
+const fmtUptime = s => {
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return (d ? d + 'd ' : '') + h + 'h ' + m + 'min';
+};
+const fmtTime = t => new Date(t * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
+
+function mkChart(id, key, opts = {}) {
+  const css = getComputedStyle(document.documentElement);
+  const color = css.getPropertyValue('--accent').trim() || '#673de6';
+  return new Chart($(id), {
+    type: 'line',
+    data: { labels: [], datasets: [{ data: [], borderColor: color, backgroundColor: color + '22',
+            fill: true, borderWidth: 1.6, pointRadius: 0, tension: .3 }] },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false,
+      interaction: { intersect: false, mode: 'index' },
+      plugins: { legend: { display: false },
+                 tooltip: { callbacks: { label: c => opts.fmt ? opts.fmt(c.parsed.y) : c.parsed.y + '%' } } },
+      scales: {
+        x: { display: false },
+        y: { min: 0, max: opts.max, ticks: { display: false }, grid: { display: false }, border: { display: false } }
+      }
+    }
+  });
+}
+const charts = {
+  cpu: mkChart('c-cpu', 'cpu', { max: 100 }),
+  mem: mkChart('c-mem', 'mem', { max: 100 }),
+  rx:  mkChart('c-rx',  'rx',  { fmt: fmtRate }),
+  tx:  mkChart('c-tx',  'tx',  { fmt: fmtRate }),
+};
+
+function redraw() {
+  for (const k in charts) {
+    const c = charts[k];
+    c.data.labels = hist.map(p => fmtTime(p.t));
+    c.data.datasets[0].data = hist.map(p => p[k]);
+    c.update('none');
+  }
+}
+
+function render(n) {
+  $('title').textContent = 'Monitor · ' + (n.label || 'VPS');
+  $('cpu').textContent = n.cpu.toFixed(0) + '%';
+  $('mem').textContent = n.mem.toFixed(0) + '%';
+  $('mem-sub').textContent = fmtBytes(n.mem_used) + ' de ' + fmtBytes(n.mem_total);
+  const dp = 100 * n.disk_used / n.disk_total;
+  $('disk').textContent = fmtBytes(n.disk_used) + ' / ' + fmtBytes(n.disk_total);
+  $('disk-sub').textContent = dp.toFixed(0) + '% usado';
+  $('disk-bar').style.width = dp + '%';
+  $('rx').textContent = fmtRate(n.rx);
+  $('rx-sub').textContent = 'Total recebido: ' + fmtBytes(n.rx_total);
+  $('tx').textContent = fmtRate(n.tx);
+  $('tx-sub').textContent = 'Total enviado: ' + fmtBytes(n.tx_total);
+  if (n.swap_total > 0) {
+    const sp = 100 * n.swap_used / n.swap_total;
+    $('swap').textContent = sp.toFixed(0) + '%';
+    $('swap-sub').textContent = fmtBytes(n.swap_used) + ' de ' + fmtBytes(n.swap_total);
+    $('swap-bar').style.width = sp + '%';
+  } else {
+    $('swap').textContent = '—';
+    $('swap-sub').textContent = 'Sem swap configurado';
+  }
+  $('uptime').textContent = fmtUptime(n.uptime);
+  $('load').textContent = n.load.join(' / ');
+  $('cpus').textContent = n.cpus;
+  $('ifaces').textContent = (n.ifaces || []).join(', ') || '—';
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/api/metrics?since=' + since, { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    pollMs = (data.interval || 5) * 1000;
+    if (data.history.length) {
+      hist.push(...data.history);
+      while (hist.length > MAX_POINTS) hist.shift();
+      since = hist[hist.length - 1].t;
+      redraw();
+    }
+    if (data.now && data.now.t) { render(data.now); lastOk = Date.now(); }
+  } catch (e) { /* mantém o último estado; o status abaixo avisa */ }
+  const ok = Date.now() - lastOk < pollMs * 3 + 2000;
+  $('status').textContent = ok ? 'Em atividade' : 'Sem dados';
+  $('status').classList.toggle('off', !ok);
+  if (lastOk) $('updated').textContent = 'Atualizado às ' + new Date(lastOk).toLocaleTimeString('pt-BR');
+  setTimeout(poll, pollMs);
+}
+poll();
+</script>
+</body>
+</html>
