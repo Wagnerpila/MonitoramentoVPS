@@ -202,7 +202,47 @@ def docker_get(path):
 apps_state = {"enabled": DOCKER_ENABLED, "error": None, "t": 0, "apps": []}
 apps_lock = threading.Lock()
 _prev = {}      # id do container -> (cpu_total, sys_total, rx, tx, instante)
-_app_hist = {}  # nome do serviço -> deque com o CPU% recente
+_app_hist = {}  # chave do app -> deque de pontos {t, cpu, mem, rx, tx} (a hora mais recente)
+hist_lock = threading.Lock()
+_inspect = {}   # id do container -> (instante, detalhes): reinícios, início e saúde mudam pouco
+INSPECT_EVERY = 60  # segundos entre consultas de detalhes do mesmo container
+
+
+def short_image(name):
+    """'n8nio/n8n:latest@sha256:abc...' -> 'n8nio/n8n:latest'."""
+    if name.startswith("sha256:"):
+        return name[7:19]
+    return name.split("@", 1)[0]
+
+
+def parse_docker_time(s):
+    """'2026-10-12T10:11:12.123456789Z' -> epoch; None se o container nunca iniciou."""
+    try:
+        if not s or s.startswith("0001-"):
+            return None
+        return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def container_details(cid, now):
+    """Reinícios, hora de início e saúde. Consulta no máximo 1x por minuto por container."""
+    hit = _inspect.get(cid)
+    if hit and now - hit[0] < INSPECT_EVERY:
+        return hit[1]
+    try:
+        d = docker_get(f"/containers/{cid}/json")
+        state = d.get("State") or {}
+        info = {
+            "restarts": int(d.get("RestartCount") or 0),
+            "started": parse_docker_time(state.get("StartedAt")),
+            "health": (state.get("Health") or {}).get("Status"),
+            "oom": bool(state.get("OOMKilled")),
+        }
+    except Exception:
+        info = hit[1] if hit else None  # falhou (ex.: proxy sem permissão): mantém o último valor
+    _inspect[cid] = (now, info)
+    return info
 
 
 def app_name(c):
@@ -264,15 +304,32 @@ def sample_apps():
             del _prev[cid]
     host_mem = read_mem()[0]
 
+    # detalhes que mudam pouco (reinícios, início, saúde): em paralelo e com cache
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        details = dict(zip(ids, ex.map(lambda i: container_details(i, now), ids)))
+    for cid in list(_inspect):
+        if cid not in stats:
+            del _inspect[cid]
+
     groups = {}
     for c in containers:
         g = groups.setdefault(app_name(c), {
             "running": 0, "states": [], "status": "", "cpu": 0.0,
             "mem_used": 0, "mem_limit": None, "rx": 0.0, "tx": 0.0,
+            "image": "", "old": 0, "restarts": 0, "started": None,
+            "health": None, "oom": False, "list": [],
         })
+        row = {
+            "id": c["Id"][:12],
+            "name": (c.get("Names") or ["/?"])[0].lstrip("/"),
+            "state": c.get("State", "?"),
+            "status": c.get("Status", ""),
+            "cpu": 0.0, "mem_used": 0, "rx": 0, "tx": 0, "started": None,
+        }
         if c.get("State") == "running":
             g["running"] += 1
             g["status"] = c.get("Status", "")
+            g["image"] = g["image"] or short_image(c.get("Image", ""))
             st = stats.get(c["Id"])
             if st:
                 cpu, mem, lim, rx, tx = container_numbers(c["Id"], st, now, host_mem)
@@ -282,18 +339,35 @@ def sample_apps():
                 g["tx"] += tx
                 if lim:
                     g["mem_limit"] = (g["mem_limit"] or 0) + lim
+                row.update(cpu=round(cpu, 1), mem_used=mem, rx=round(rx), tx=round(tx))
+            d = details.get(c["Id"])
+            if d:
+                g["restarts"] += d["restarts"]
+                if d["started"] and (g["started"] is None or d["started"] < g["started"]):
+                    g["started"] = d["started"]
+                if d["health"] == "unhealthy" or (d["health"] and g["health"] != "unhealthy"):
+                    g["health"] = d["health"]
+                g["oom"] = g["oom"] or d["oom"]
+                row["started"] = d["started"]
         else:
             g["states"].append(c.get("State", "?"))
+            g["old"] += 1  # container parado do mesmo serviço (deploy anterior ou falha) que o Docker ainda guarda
+            g["image"] = g["image"] or short_image(c.get("Image", ""))
             if not g["running"] and not g["status"]:
                 g["status"] = c.get("Status", "")
+        g["list"].append(row)
 
     apps = []
     for key, g in groups.items():
-        hist = _app_hist.setdefault(key, deque(maxlen=APP_HISTORY))
-        hist.append(round(g["cpu"], 1))
+        with hist_lock:
+            hist = _app_hist.setdefault(key, deque(maxlen=HISTORY))
+            hist.append({"t": int(now), "cpu": round(g["cpu"], 1), "mem": g["mem_used"],
+                         "rx": round(g["rx"]), "tx": round(g["tx"])})
+            recent_cpu = [p["cpu"] for p in list(hist)[-APP_HISTORY:]]
         project, _, service = key.partition("_")
         if not service:
             project, service = "", key
+        g["list"].sort(key=lambda r: (r["state"] != "running", r["name"]))
         apps.append({
             "key": key,
             "project": project,
@@ -306,11 +380,19 @@ def sample_apps():
             "mem_limit": g["mem_limit"],
             "rx": round(g["rx"]),
             "tx": round(g["tx"]),
-            "cpu_hist": list(hist),
+            "cpu_hist": recent_cpu,
+            "image": g["image"],
+            "restarts": g["restarts"],
+            "old": g["old"],
+            "started": g["started"],
+            "health": g["health"],
+            "oom": g["oom"],
+            "containers": g["list"],
         })
-    for key in list(_app_hist):
-        if key not in groups:
-            del _app_hist[key]
+    with hist_lock:
+        for key in list(_app_hist):
+            if key not in groups:
+                del _app_hist[key]
     apps.sort(key=lambda a: a["mem_used"], reverse=True)
     return apps
 
@@ -593,8 +675,29 @@ class Handler(BaseHTTPRequestHandler):
 
         if url.path == "/api/apps":
             with apps_lock:
-                payload = json.dumps(apps_state).encode()
-            return self._send(200, payload, "application/json")
+                snap = dict(apps_state)
+            snap["apps"] = [{k: v for k, v in a.items() if k != "containers"} for a in snap["apps"]]
+            return self._send(200, json.dumps(snap).encode(), "application/json")
+
+        if url.path == "/api/app":
+            q = parse_qs(url.query)
+            key = (q.get("key", [""])[0])
+            since = int(q.get("since", ["0"])[0] or 0)
+            with apps_lock:
+                snap = dict(apps_state)
+            found = next((a for a in snap["apps"] if a["key"] == key), None)
+            with hist_lock:
+                pts = [p for p in _app_hist.get(key, ()) if p["t"] > since]
+            with lock:
+                host = dict(latest)
+            alerts = [a for a in alerts_snapshot()["active"] if a["key"].endswith(":" + key)]
+            payload = {
+                "found": found is not None, "app": found, "history": pts,
+                "interval": INTERVAL, "host": host, "alerts": alerts,
+                "enabled": snap["enabled"], "error": snap["error"],
+                "thresholds": THRESHOLDS,
+            }
+            return self._send(200, json.dumps(payload).encode(), "application/json")
 
         if url.path == "/api/alerts":
             return self._send(200, json.dumps(alerts_snapshot()).encode(), "application/json")

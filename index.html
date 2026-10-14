@@ -189,6 +189,32 @@
   .btn:hover { border-color: var(--c2); }
   .btn:focus-visible { outline: 2px solid var(--c2); outline-offset: 2px; }
 
+  [hidden] { display: none !important; }
+
+  /* Lista de apps clicável */
+  a.approw { color: inherit; text-decoration: none; }
+  a.approw:hover .appname b { color: var(--c3); text-decoration: underline; text-underline-offset: 3px; }
+  a.approw:focus-visible { outline: 2px solid var(--c2); outline-offset: 3px; border-radius: 6px; }
+  .appname .go { color: var(--c2); margin-left: 6px; font-weight: 600; }
+
+  /* Página de um aplicativo */
+  .back { display: inline-flex; align-items: center; gap: 6px; color: var(--c2); text-decoration: none; font-size: 14px; font-weight: 500; margin-bottom: 12px; }
+  .back:hover { color: var(--c3); text-decoration: underline; text-underline-offset: 3px; }
+  .back:focus-visible { outline: 2px solid var(--c2); outline-offset: 3px; border-radius: 4px; }
+  .apptitle { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+  .apptitle h2 { margin: 0; font-family: var(--cond); font-weight: 400; font-size: 30px; line-height: 1.1; overflow-wrap: anywhere; }
+  .apptitle h2 .p { color: var(--muted); }
+  .apptitle .sub { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
+  .health { display: flex; flex-direction: column; justify-content: center; min-height: 190px; }
+  .health .big { display: flex; align-items: center; gap: 12px; font-family: var(--cond); font-weight: 300; font-size: 40px; line-height: 1.1; justify-content: center; text-align: center; margin: 18px 0 6px; }
+  .health .big .dot { width: 12px; height: 12px; flex: none; }
+  .health .big .dot.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .health .hs { text-align: center; color: var(--muted); font-size: 12.5px; }
+  .dl { display: grid; grid-template-columns: auto 1fr; gap: 9px 18px; margin: 0; font-size: 13.5px; }
+  .dl dt { color: var(--muted); }
+  .dl dd { margin: 0; text-align: right; overflow-wrap: anywhere; min-width: 0; }
+  .dl dd.bad { color: var(--bad); }
+
   .foot { margin-top: 22px; font-size: 12.5px; color: var(--muted); text-align: center; }
   @media (prefers-reduced-motion: reduce) {
     .gauge .prog, .gauge .tick, .meter > i, .seg .fill { transition: none; }
@@ -212,6 +238,7 @@
     </div>
   </header>
 
+<div id="view-home">
   <section class="kpis" aria-label="Resumo da VPS">
     <div class="kpi"><span>Tempo ligada</span><b id="k-uptime">—</b></div>
     <div class="kpi"><span>vCPUs</span><b id="k-cpus">—</b></div>
@@ -276,8 +303,8 @@
   </section>
 
   <section class="row">
-    <article class="panel">
-      <h2>Aplicativos do EasyPanel <small id="apps-sum">100% de CPU equivale a 1 vCPU</small></h2>
+    <article class="panel" id="apps-panel">
+      <h2>Aplicativos do EasyPanel <small id="apps-sum">Clique em um app para ver o detalhe · 100% de CPU = 1 vCPU</small></h2>
       <p class="note" id="apps-note" hidden></p>
       <div id="apps-list" hidden>
         <div class="apphead"><span>Aplicativo</span><span>Status</span><span>CPU</span><span>Memória</span><span>Rede</span><span>CPU recente</span></div>
@@ -298,6 +325,89 @@
       </div>
     </article>
   </section>
+</div>
+
+<div id="view-app" hidden>
+  <a class="back" href="#/">← Todos os aplicativos</a>
+  <div class="apptitle">
+    <div>
+      <h2 id="a-title">…</h2>
+      <div class="sub" id="a-sub"></div>
+    </div>
+    <span class="pill warn" id="a-state">Carregando</span>
+  </div>
+  <p class="note" id="a-note" hidden></p>
+
+  <div id="a-body" hidden>
+    <section class="row g3">
+      <article class="panel bracket">
+        <h2>Processador <small class="awin"></small></h2>
+        <div class="gauge" id="ag-cpu"></div>
+        <div class="minis" id="am-cpu"></div>
+      </article>
+      <article class="panel bracket">
+        <h2>Memória <small class="awin"></small></h2>
+        <div class="gauge" id="ag-mem"></div>
+        <div class="minis" id="am-mem"></div>
+      </article>
+      <article class="panel bracket">
+        <h2>Fatia da VPS</h2>
+        <div class="gauge" id="ag-share"></div>
+        <div class="minis" id="am-share"></div>
+      </article>
+      <article class="panel bracket">
+        <h2>Saúde</h2>
+        <div class="health">
+          <div class="big" id="ah-big"></div>
+          <div class="hs" id="ah-sub"></div>
+        </div>
+        <div class="minis" id="am-health"></div>
+      </article>
+    </section>
+
+    <section class="row g21">
+      <article class="panel">
+        <h2>Uso de CPU <small class="awin"></small></h2>
+        <div class="chart" id="ach-cpu"></div>
+      </article>
+      <article class="panel">
+        <h2>Uso de memória <small class="awin"></small></h2>
+        <div class="chart" id="ach-mem"></div>
+      </article>
+    </section>
+
+    <section class="row g21">
+      <article class="panel">
+        <h2>Tráfego de rede <small class="awin"></small></h2>
+        <div class="netkpi">
+          <div><span class="k"><i style="background:var(--c2)"></i>Entrada</span><b id="an-rx">—</b></div>
+          <div><span class="k"><i style="background:var(--alt)"></i>Saída</span><b id="an-tx">—</b></div>
+        </div>
+        <div class="chart" id="ach-net"></div>
+      </article>
+      <article class="panel">
+        <h2>Detalhes</h2>
+        <dl class="dl" id="a-dl"></dl>
+      </article>
+    </section>
+
+    <section class="row">
+      <article class="panel">
+        <h2>Containers do serviço <small id="ac-sum"></small></h2>
+        <div class="apphead"><span>Container</span><span>Status</span><span>CPU</span><span>Memória</span><span>Rede</span><span>Iniciado</span></div>
+        <div id="ac-body"></div>
+      </article>
+    </section>
+
+    <section class="row">
+      <article class="panel">
+        <h2>Alertas deste aplicativo</h2>
+        <p class="note" id="aa-note"></p>
+        <div class="chips" id="aa-active"></div>
+      </article>
+    </section>
+  </div>
+</div>
 
   <div class="foot">Os gráficos mostram o que o monitor coletou desde que o serviço iniciou. Os totais de rede contam desde o último boot da VPS.</div>
 </div>
@@ -325,6 +435,7 @@ const fmtClock = t => new Date(t * 1000).toLocaleTimeString('pt-BR', { hour: '2-
 const fmtHM = t => new Date(t * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 const fmtWhen = t => new Date(t * 1000).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 const sevClass = v => v >= 90 ? 'bad' : v >= 75 ? 'warn' : '';
+const fmtPct = v => (v === 0 || v >= 10 ? Math.round(v) : v.toFixed(1)) + '%'; /* abaixo de 10% mostra 1 casa: apps ociosos não aparecem como 0% */
 
 /* ---------- mostrador circular ---------- */
 function makeGauge(host, o) {
@@ -363,7 +474,7 @@ function makeGauge(host, o) {
     prog.setAttribute('stroke', 'url(#' + id + '-' + sev + ')');
     svg.setAttribute('data-sev', sev);
     for (const t of tickEls) t.classList.toggle('on', +t.getAttribute('data-f') <= v + 0.01);
-    nEl.textContent = Math.round(v);
+    nEl.textContent = v > 0 && v < 10 ? v.toFixed(1) : Math.round(v);
     sEl.textContent = sub || '';
   };
 }
@@ -487,6 +598,7 @@ function spark(vals) {
 /* ---------- estado e componentes ---------- */
 const hist = [];
 let now = null, appsData = null, alertsData = null, since = 0, lastOk = 0, pollMs = 5000;
+let appKey = null, appHist = [], appSince = 0, appTimer = 0, appData = null;
 
 const gCpu = makeGauge($('g-cpu'), { label: 'CPU' });
 const gMem = makeGauge($('g-mem'), { label: 'RAM' });
@@ -498,6 +610,7 @@ function drawCharts() {
   drawEq(chCpu, hist, 'cpu', { max: 100, name: 'CPU', fmt: v => Math.round(v) + '%' });
   drawArea(chMem, hist, [{ key: 'mem', color: 'c2', name: 'Memória' }], { max: 100, L: 40, fmt: v => Math.round(v) + '%' });
   drawArea(chNet, hist, [{ key: 'rx', color: 'c2', name: 'Entrada' }, { key: 'tx', color: 'alt', name: 'Saída' }], { L: 78, fmt: fmtRate, bin: true });
+  if (appKey) drawAppCharts();
   if (now) {
     const lab = (h, t) => { h.setAttribute('role', 'img'); h.setAttribute('aria-label', t); };
     lab(chCpu, 'Gráfico de uso de CPU. Agora: ' + Math.round(now.cpu) + '%.');
@@ -571,6 +684,52 @@ function renderHost(n) {
   if (appsData) renderApps(appsData);
 }
 
+const STATE_NAMES = { running: 'Rodando', exited: 'Parado', restarting: 'Reiniciando', paused: 'Pausado', created: 'Criado', dead: 'Morto' };
+
+/* Uma linha da tabela (app na lista geral ou container na página do app). o.href vira link. */
+function buildRow(a, o) {
+  const row = el(o.href ? 'a' : 'div', 'approw');
+  if (o.href) { row.href = o.href; row.title = 'Abrir o monitoramento deste aplicativo'; }
+
+  const name = el('div', 'appname');
+  name.append(o.nameNode);
+  if (o.href) name.append(el('span', 'go', '›'));
+  row.append(name);
+
+  const st = el('div'); st.setAttribute('data-l', 'Status');
+  const state = el('span', 'state');
+  state.append(el('i', 'dot' + (a.state === 'running' ? '' : ' off')));
+  state.append(document.createTextNode(STATE_NAMES[a.state] || a.state));
+  state.title = a.status || '';
+  st.append(state); row.append(st);
+
+  const cpu = el('div'); cpu.setAttribute('data-l', 'CPU');
+  const cm = el('div', 'cm'), cmeter = el('div', 'meter ' + sevClass(a.cpu)); cmeter.append(el('i'));
+  cmeter.firstChild.style.width = clamp(a.cpu, 0, 100) + '%';
+  cm.append(cmeter, el('span', 'val', fmtPct(a.cpu)));
+  cpu.append(cm); row.append(cpu);
+
+  const mem = el('div'); mem.setAttribute('data-l', 'Memória');
+  const hostMem = now ? now.mem_total : 0;
+  const mpct = a.mem_limit ? 100 * a.mem_used / a.mem_limit : (hostMem ? 100 * a.mem_used / hostMem : 0);
+  const mm = el('div', 'cm'), mmeter = el('div', 'meter ' + (a.mem_limit ? sevClass(mpct) : '')); mmeter.append(el('i'));
+  mmeter.firstChild.style.width = clamp(mpct, 0, 100) + '%';
+  mm.append(mmeter, el('span', 'val', fmtPct(mpct)));
+  mem.append(mm, el('div', 'sub2', a.mem_limit ? fmtBytes(a.mem_used) + ' de ' + fmtBytes(a.mem_limit) : fmtBytes(a.mem_used) + ' da VPS'));
+  row.append(mem);
+
+  const net = el('div', 'net2'); net.setAttribute('data-l', 'Rede');
+  const dn = el('div'); dn.append(el('span', '', 'Entrada '), document.createTextNode(fmtRate(a.rx)));
+  const up = el('div'); up.append(el('span', '', 'Saída '), document.createTextNode(fmtRate(a.tx)));
+  net.append(dn, up); row.append(net);
+
+  const last = el('div'); last.setAttribute('data-l', o.lastLabel);
+  if (o.spark) { if (a.state === 'running') last.innerHTML = spark(a.cpu_hist || []); else last.textContent = '—'; }
+  else last.textContent = o.lastText;
+  row.append(last);
+  return row;
+}
+
 function renderApps(d) {
   appsData = d;
   const note = $('apps-note'), list = $('apps-list'), body = $('apps-body');
@@ -585,50 +744,176 @@ function renderApps(d) {
   list.hidden = !d.apps.length;
   const running = d.apps.filter(a => a.state === 'running').length;
   $('k-apps').textContent = d.apps.length ? running + ' de ' + d.apps.length : '0';
-  const hostMem = now ? now.mem_total : 0;
   body.replaceChildren();
   for (const a of d.apps) {
-    const row = el('div', 'approw');
-
-    const name = el('div', 'appname');
-    if (a.project) name.append(el('span', 'p', a.project + ' / '));
-    name.append(el('b', '', a.service + (a.replicas > 1 ? ' ×' + a.replicas : '')));
-    row.append(name);
-
-    const st = el('div'); st.setAttribute('data-l', 'Status');
-    const state = el('span', 'state');
-    state.append(el('i', 'dot' + (a.state === 'running' ? '' : ' off')));
-    const names = { running: 'Rodando', exited: 'Parado', restarting: 'Reiniciando', paused: 'Pausado', created: 'Criado', dead: 'Morto' };
-    state.append(document.createTextNode(names[a.state] || a.state));
-    state.title = a.status || '';
-    st.append(state); row.append(st);
-
-    const cpu = el('div'); cpu.setAttribute('data-l', 'CPU');
-    const cm = el('div', 'cm'), cmeter = el('div', 'meter ' + sevClass(a.cpu)); cmeter.append(el('i'));
-    cmeter.firstChild.style.width = clamp(a.cpu, 0, 100) + '%';
-    cm.append(cmeter, el('span', 'val', a.cpu.toFixed(0) + '%'));
-    cpu.append(cm); row.append(cpu);
-
-    const mem = el('div'); mem.setAttribute('data-l', 'Memória');
-    const mpct = a.mem_limit ? 100 * a.mem_used / a.mem_limit : (hostMem ? 100 * a.mem_used / hostMem : 0);
-    const mm = el('div', 'cm'), mmeter = el('div', 'meter ' + (a.mem_limit ? sevClass(mpct) : '')); mmeter.append(el('i'));
-    mmeter.firstChild.style.width = clamp(mpct, 0, 100) + '%';
-    mm.append(mmeter, el('span', 'val', mpct.toFixed(0) + '%'));
-    mem.append(mm, el('div', 'sub2', a.mem_limit ? fmtBytes(a.mem_used) + ' de ' + fmtBytes(a.mem_limit) : fmtBytes(a.mem_used) + ' da VPS'));
-    row.append(mem);
-
-    const net = el('div', 'net2'); net.setAttribute('data-l', 'Rede');
-    const dn = el('div'); dn.append(el('span', '', 'Entrada '), document.createTextNode(fmtRate(a.rx)));
-    const up = el('div'); up.append(el('span', '', 'Saída '), document.createTextNode(fmtRate(a.tx)));
-    net.append(dn, up); row.append(net);
-
-    const sp = el('div'); sp.setAttribute('data-l', 'CPU recente');
-    if (a.state === 'running') sp.innerHTML = spark(a.cpu_hist || []); else sp.textContent = '—';
-    row.append(sp);
-
-    body.append(row);
+    const nameNode = el('span');
+    if (a.project) nameNode.append(el('span', 'p', a.project + ' / '));
+    nameNode.append(el('b', '', a.service + (a.replicas > 1 ? ' ×' + a.replicas : '')));
+    body.append(buildRow(a, { href: '#/app/' + encodeURIComponent(a.key), nameNode, spark: true, lastLabel: 'CPU recente' }));
   }
 }
+
+/* ---------- página de um aplicativo ---------- */
+const aGCpu = makeGauge($('ag-cpu'), { label: 'CPU' });
+const aGMem = makeGauge($('ag-mem'), { label: 'RAM' });
+const aGShare = makeGauge($('ag-share'), { label: 'CPU da VPS', sweep: 360 });
+const achCpu = $('ach-cpu'), achMem = $('ach-mem'), achNet = $('ach-net');
+
+function drawAppCharts() {
+  let m = 0;
+  for (const p of appHist) if (p.cpu > m) m = p.cpu;
+  drawEq(achCpu, appHist, 'cpu', { max: Math.max(10, niceMax(m, false)), name: 'CPU', fmt: fmtPct });
+  drawArea(achMem, appHist, [{ key: 'mem', color: 'c2', name: 'Memória' }], { L: 70, fmt: fmtBytes, bin: true });
+  drawArea(achNet, appHist, [{ key: 'rx', color: 'c2', name: 'Entrada' }, { key: 'tx', color: 'alt', name: 'Saída' }], { L: 78, fmt: fmtRate, bin: true });
+  const a = appData && appData.app;
+  if (a) {
+    const lab = (h, t) => { h.setAttribute('role', 'img'); h.setAttribute('aria-label', t); };
+    lab(achCpu, 'Gráfico de uso de CPU de ' + a.service + '. Agora: ' + fmtPct(a.cpu) + '.');
+    lab(achMem, 'Gráfico de uso de memória de ' + a.service + '. Agora: ' + fmtBytes(a.mem_used) + '.');
+    lab(achNet, 'Gráfico de tráfego de rede de ' + a.service + '. Agora: entrada ' + fmtRate(a.rx) + ', saída ' + fmtRate(a.tx) + '.');
+  }
+}
+initChart(achCpu, scheduleRedraw);
+initChart(achMem, scheduleRedraw);
+initChart(achNet, scheduleRedraw);
+
+function setAppTitle(key, a) {
+  const t = $('a-title'); t.replaceChildren();
+  const project = a ? a.project : key.indexOf('_') > 0 ? key.split('_')[0] : '';
+  const service = a ? a.service : key.indexOf('_') > 0 ? key.slice(key.indexOf('_') + 1) : key;
+  if (project) t.append(el('span', 'p', project + ' / '));
+  t.append(document.createTextNode(service));
+  document.title = service + ' · Monitor da VPS';
+}
+
+function appNote(text) {
+  const n = $('a-note');
+  n.hidden = !text; n.textContent = text || '';
+  $('a-body').hidden = !!text;
+}
+
+function renderApp(d) {
+  appData = d;
+  if (!d.enabled) { setAppTitle(appKey, null); $('a-state').hidden = true; $('a-sub').textContent = '';
+    return appNote('O monitor ainda não está conectado ao Docker. Siga a seção "Aplicativos do EasyPanel" do README.'); }
+  if (!d.found) {
+    setAppTitle(appKey, null); $('a-state').hidden = true; $('a-sub').textContent = '';
+    return appNote(d.error ? 'Não consegui falar com o Docker: ' + d.error :
+      d.history.length || appHist.length ? 'Este aplicativo não aparece mais no Docker (foi removido ou renomeado). Volte à lista para ver os que existem agora.' :
+      'Não encontrei um aplicativo com esse nome. Volte à lista e escolha um da tabela.');
+  }
+  const a = d.app, h = d.host || {};
+  appNote('');
+  setAppTitle(appKey, a);
+  const running = a.state === 'running';
+  const pill = $('a-state'); pill.hidden = false;
+  pill.className = 'pill' + (running ? '' : ' warn');
+  pill.textContent = STATE_NAMES[a.state] || a.state;
+  $('a-sub').textContent = (a.image || 'imagem desconhecida') + (a.status ? ' · ' + a.status : '');
+
+  const span = appHist.length > 1 ? Math.round((appHist[appHist.length - 1].t - appHist[0].t) / 60) : 0;
+  document.querySelectorAll('.awin').forEach(w => { w.textContent = span >= 1 ? 'últimos ' + span + ' min' : 'coletando'; });
+
+  const avg = k => appHist.length ? appHist.reduce((s, p) => s + p[k], 0) / appHist.length : a[k === 'mem' ? 'mem_used' : k];
+  const peak = k => appHist.reduce((m, p) => Math.max(m, p[k]), 0);
+
+  aGCpu(a.cpu, a.cpu > 100 ? fmtPct(a.cpu) + ' (mais de 1 vCPU)' : '100% = 1 vCPU');
+  minis($('am-cpu'), [['Média', fmtPct(avg('cpu'))], ['Pico', fmtPct(peak('cpu'))]]);
+
+  const hostMem = h.mem_total || 0;
+  const mpct = a.mem_limit ? 100 * a.mem_used / a.mem_limit : (hostMem ? 100 * a.mem_used / hostMem : 0);
+  aGMem(mpct, a.mem_limit ? fmtBytes(a.mem_used) + ' de ' + fmtBytes(a.mem_limit) : fmtBytes(a.mem_used) + (hostMem ? ' da VPS' : ''));
+  minis($('am-mem'), [['Média', fmtBytes(avg('mem'))], ['Pico', fmtBytes(peak('mem'))]]);
+
+  const cpus = h.cpus || 1;
+  aGShare(a.cpu / cpus, 'de ' + cpus + (cpus > 1 ? ' vCPUs' : ' vCPU'));
+  minis($('am-share'), [['Entrada', fmtRate(a.rx)], ['Saída', fmtRate(a.tx)]]);
+
+  const hm = { healthy: ['Saudável', ''], unhealthy: ['Com falha', 'off'], starting: ['Iniciando', 'warn'] }[a.health];
+  const big = $('ah-big'); big.replaceChildren();
+  let label, cls = '';
+  if (!running) { label = STATE_NAMES[a.state] || a.state; cls = 'off'; }
+  else if (hm) { label = hm[0]; cls = hm[1]; }
+  else { label = 'No ar'; }
+  big.append(el('i', 'dot ' + cls), document.createTextNode(label));
+  $('ah-sub').textContent = !running ? 'O container não está em execução.' :
+    hm ? 'Resultado do teste de saúde configurado no app.' : 'Sem teste de saúde configurado; vale o estado do container.';
+  const up = running && a.started ? fmtUptime(Date.now() / 1000 - a.started) : '—';
+  minis($('am-health'), [['Reinícios', String(a.restarts)], ['Rodando há', up]]);
+
+  $('an-rx').textContent = fmtRate(a.rx);
+  $('an-tx').textContent = fmtRate(a.tx);
+
+  const dl = $('a-dl'); dl.replaceChildren();
+  const add = (k, v, cls) => { dl.append(el('dt', '', k)); dl.append(el('dd', cls || '', v)); };
+  add('Imagem', a.image || '—');
+  add('Réplicas rodando', String(a.replicas));
+  add('Reinícios', String(a.restarts), a.restarts > 0 ? 'bad' : '');
+  add('Iniciado em', a.started ? fmtWhen(a.started) : '—');
+  if (a.old && running) add('Containers parados', String(a.old) + ' (versões antigas)');
+  add('Parou por falta de memória', a.oom ? 'Sim' : 'Não', a.oom ? 'bad' : '');
+  add('Limite de memória', a.mem_limit ? fmtBytes(a.mem_limit) : 'Sem limite');
+
+  $('ac-sum').textContent = a.containers.length + (a.containers.length === 1 ? ' container' : ' containers');
+  const body = $('ac-body'); body.replaceChildren();
+  for (const c of a.containers) {
+    const nameNode = el('b', '', c.name);
+    body.append(buildRow(c, { nameNode, lastLabel: 'Iniciado', lastText: c.started ? fmtWhen(c.started) : '—' }));
+  }
+
+  const t = d.thresholds || {}, parts = [];
+  parts.push('parado há mais de ' + (alertsData ? alertsData.down_after : 60) + ' s');
+  if (t.app_cpu > 0) parts.push('CPU acima de ' + t.app_cpu + '%');
+  if (t.app_mem > 0) parts.push('memória acima de ' + t.app_mem + '% do limite');
+  $('aa-note').textContent = 'O WhatsApp avisa quando este app ficar ' + parts.join(', ') + '. Os limites de uso precisam durar alguns minutos para disparar.';
+  const act = $('aa-active'); act.replaceChildren();
+  if (!d.alerts.length) act.append(el('div', 'chip ok', 'Nenhum alerta ativo para este aplicativo.'));
+  for (const x of d.alerts) act.append(el('div', 'chip' + (x.fired ? '' : ' wait'), x.text + ', desde ' + fmtHM(x.since) + (x.fired ? '' : ' (confirmando)')));
+  scheduleRedraw();
+}
+
+async function pollApp() {
+  clearTimeout(appTimer);
+  const key = appKey;
+  if (!key) return;
+  try {
+    const r = await fetch('/api/app?key=' + encodeURIComponent(key) + '&since=' + appSince, { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    if (key !== appKey) return;
+    if (d.history.length) {
+      appHist.push.apply(appHist, d.history);
+      while (appHist.length > 720) appHist.shift();
+      appSince = appHist[appHist.length - 1].t;
+    }
+    renderApp(d);
+  } catch (e) { /* tenta no próximo ciclo */ }
+  if (key === appKey) appTimer = setTimeout(pollApp, pollMs);
+}
+
+function route() {
+  const m = /^#\/app\/(.+)$/.exec(location.hash);
+  if (m) {
+    let key; try { key = decodeURIComponent(m[1]); } catch (e) { key = m[1]; }
+    if (key !== appKey) {
+      appKey = key; appHist = []; appSince = 0; appData = null;
+      setAppTitle(key, null);
+      $('a-sub').textContent = ''; $('a-state').hidden = true;
+      appNote('Carregando…');
+    }
+    $('view-home').hidden = true; $('view-app').hidden = false;
+    window.scrollTo(0, 0);
+    pollApp();
+  } else {
+    const was = appKey;
+    appKey = null; clearTimeout(appTimer);
+    $('view-app').hidden = true; $('view-home').hidden = false;
+    document.title = 'Monitor da VPS';
+    scheduleRedraw();
+    if (was) $('apps-panel').scrollIntoView({ block: 'start' });
+  }
+}
+window.addEventListener('hashchange', route);
 
 function renderAlerts(d) {
   alertsData = d;
@@ -736,6 +1021,7 @@ markTheme();
 poll();
 pollApps();
 pollAlerts();
+route();
 })();
 </script>
 </body>
