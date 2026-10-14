@@ -75,6 +75,58 @@ Se usar esta opção, mantenha `DASH_USER` e `DASH_PASS` bem fortes.
   que está rodando ficam escondidos.
 - O mini gráfico mostra o CPU dos últimos ~10 minutos.
 
+## Alertas por WhatsApp (opcional)
+
+O monitor manda mensagem pela sua Evolution API quando algo passa do limite ou quando um app para.
+Configure estas variáveis no **Environment** do serviço do monitor:
+
+```
+EVOLUTION_URL=http://evolution_evolution-api:8080
+EVOLUTION_INSTANCE=nome-da-sua-instancia
+EVOLUTION_APIKEY=a-chave-da-api
+ALERT_NUMBER=5543999999999
+```
+
+- `EVOLUTION_URL`: endereço da Evolution API. Dentro do EasyPanel use o nome interno do serviço
+  (`http://projeto_servico:porta`); se preferir, use o domínio público (`https://...`).
+- `EVOLUTION_INSTANCE`: nome da instância conectada ao seu WhatsApp, como aparece no manager da Evolution.
+- `EVOLUTION_APIKEY`: chave da API (global ou da instância). Guarde só aqui, nunca no GitHub.
+- `ALERT_NUMBER`: número que recebe os avisos, com código do país e DDD, só números
+  (ex.: `5543999999999`). Para vários números, separe por vírgula.
+
+Depois do deploy, abra o painel, vá no quadro **Alertas por WhatsApp** e clique em
+**Enviar mensagem de teste**. Se falhar, o painel mostra o motivo (variável faltando, chave errada etc.).
+
+### O que gera aviso
+
+| Situação | Limite padrão | Variável |
+|---|---|---|
+| CPU da VPS | 90% | `ALERT_CPU_PCT` |
+| Memória da VPS | 90% | `ALERT_MEM_PCT` |
+| Disco da VPS | 85% | `ALERT_DISK_PCT` |
+| CPU de um app (100% = 1 vCPU) | 90% | `ALERT_APP_CPU_PCT` |
+| Memória de um app (% do limite dele) | 90% | `ALERT_APP_MEM_PCT` |
+| App parado | parado há 60 s | `ALERT_DOWN_SECONDS` |
+
+Use `0` em qualquer limite para desligar aquele alerta. Os alertas de apps precisam do acesso ao Docker
+(seção anterior); os da VPS funcionam sem ele.
+
+### Como se comporta
+
+- Os limites de uso só disparam se o problema durar `ALERT_SUSTAIN_SECONDS` (padrão 120 s), para
+  picos rápidos não gerarem mensagem.
+- Enquanto o problema continuar, o monitor lembra a cada `ALERT_COOLDOWN_MINUTES` (padrão 30 min).
+- Quando volta ao normal, manda uma mensagem de "Normalizado".
+- O alerta de "app parado" só vale para apps que o monitor já viu rodando. Serviços que você parou
+  de propósito antes não geram aviso. Se você redeploya um app e ele leva mais de 60 s para voltar,
+  aumente `ALERT_DOWN_SECONDS`.
+- As horas nas mensagens usam `TZ_OFFSET_HOURS` (padrão `-3`, horário de Brasília).
+
+### Limitação importante
+
+Se a **VPS inteira** cair, o monitor cai junto e não consegue avisar. Para esse caso, use também um
+verificador externo (por exemplo UptimeRobot ou Better Stack) apontando para o domínio do painel.
+
 ## Variáveis opcionais
 
 | Variável | Padrão | Para quê |
@@ -84,6 +136,9 @@ Se usar esta opção, mantenha `DASH_USER` e `DASH_PASS` bem fortes.
 | `DISK_PATH` | `/` | caminho cujo uso de disco é medido |
 | `PORT` | `8080` | porta interna |
 | `DOCKER_HOST` | vazio | `tcp://host:2375` (proxy) ou `unix:///var/run/docker.sock`; vazio desativa a tabela, a não ser que o socket esteja montado |
+| `ALERT_SUSTAIN_SECONDS` | `120` | quanto tempo um limite de uso precisa durar para avisar |
+| `ALERT_COOLDOWN_MINUTES` | `30` | intervalo entre lembretes |
+| `TZ_OFFSET_HOURS` | `-3` | fuso usado na hora das mensagens |
 
 ## Observações
 

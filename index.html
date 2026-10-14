@@ -52,6 +52,13 @@
   .app-name { font-weight: 600; }
   .spark { stroke: var(--accent); fill: none; stroke-width: 1.5; vertical-align: middle; }
   .pill.warn { background: var(--badbg); color: var(--bad); }
+  .apps h2 .pill { margin-left: 8px; }
+  .btn { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 8px; cursor: pointer;
+         border: 1px solid var(--line); background: var(--card); color: var(--text); }
+  .btn:hover { border-color: var(--accent); }
+  .al-line { font-size: 14px; margin: 4px 0; }
+  .al-actions { margin-top: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .al-actions .note { margin: 0; }
 </style>
 </head>
 <body>
@@ -117,6 +124,22 @@
         </thead>
         <tbody id="apps-body"></tbody>
       </table>
+    </div>
+  </section>
+
+  <section class="card apps" id="alerts-card" hidden>
+    <h2>Alertas por WhatsApp <span class="pill" id="al-pill">—</span></h2>
+    <div class="note" id="al-note"></div>
+    <div id="al-active"></div>
+    <div class="tablewrap">
+      <table id="al-table" hidden>
+        <thead><tr><th>Quando</th><th>Tipo</th><th>Mensagem</th><th>Envio</th></tr></thead>
+        <tbody id="al-body"></tbody>
+      </table>
+    </div>
+    <div class="al-actions">
+      <button class="btn" id="al-test" type="button">Enviar mensagem de teste</button>
+      <span class="note" id="al-test-res"></span>
     </div>
   </section>
 
@@ -303,8 +326,88 @@ async function pollApps() {
   setTimeout(pollApps, Math.max(pollMs, 5000));
 }
 
+const KIND_PT = { alerta: 'Alerta', lembrete: 'Lembrete', normalizado: 'Normalizado', teste: 'Teste' };
+const fmtWhen = t => new Date(t * 1000).toLocaleString('pt-BR',
+  { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+function renderAlerts(d) {
+  $('alerts-card').hidden = false;
+  const pill = $('al-pill'), note = $('al-note'), act = $('al-active');
+  const table = $('al-table'), body = $('al-body');
+  pill.textContent = d.enabled ? 'Ativo' : 'Desativado';
+  pill.className = 'pill' + (d.enabled ? '' : ' warn');
+  act.replaceChildren();
+  body.replaceChildren();
+
+  if (!d.enabled) {
+    note.textContent = 'Faltam variáveis de ambiente no serviço do monitor: ' + d.missing.join(', ') + '.';
+    table.hidden = true;
+    return;
+  }
+
+  const t = d.thresholds, parts = [];
+  if (t.cpu > 0) parts.push('CPU da VPS ≥ ' + t.cpu + '%');
+  if (t.mem > 0) parts.push('memória da VPS ≥ ' + t.mem + '%');
+  if (t.disk > 0) parts.push('disco ≥ ' + t.disk + '%');
+  if (d.docker) {
+    parts.push('app parado há ' + d.down_after + 's');
+    if (t.app_cpu > 0) parts.push('CPU de app ≥ ' + t.app_cpu + '%');
+    if (t.app_mem > 0) parts.push('memória de app ≥ ' + t.app_mem + '% do limite');
+  }
+  note.textContent = 'Avisa ' + d.numbers.join(', ') + ' quando: ' + parts.join(' · ') +
+    '. Os limites de uso precisam durar ' + Math.round(d.sustain / 6) / 10 + ' min; lembra a cada ' +
+    Math.round(d.cooldown / 60) + ' min enquanto o problema continuar.';
+
+  if (!d.active.length) {
+    const ok = document.createElement('div');
+    ok.className = 'al-line';
+    ok.textContent = '✅ Nenhum alerta ativo.';
+    act.appendChild(ok);
+  }
+  for (const a of d.active) {
+    const line = document.createElement('div');
+    line.className = 'al-line';
+    line.textContent = (a.fired ? '🚨 ' : '⏳ ') + a.text + ' · desde ' + fmtTime(a.since) +
+      (a.fired ? '' : ' (confirmando)');
+    act.appendChild(line);
+  }
+
+  table.hidden = !d.events.length;
+  for (const e of d.events) {
+    const tr = document.createElement('tr');
+    cell(tr, fmtWhen(e.t));
+    cell(tr, KIND_PT[e.kind] || e.kind);
+    const msg = cell(tr, e.text);
+    msg.style.whiteSpace = 'normal';
+    const res = cell(tr, e.ok ? 'Enviado' : 'Falhou');
+    if (!e.ok) res.title = e.detail;
+    body.appendChild(tr);
+  }
+}
+
+async function loadAlerts() {
+  try {
+    const r = await fetch('/api/alerts', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    renderAlerts(await r.json());
+  } catch (e) { /* tenta de novo no próximo ciclo */ }
+}
+function pollAlerts() { loadAlerts().finally(() => setTimeout(pollAlerts, 15000)); }
+
+$('al-test').addEventListener('click', async () => {
+  const res = $('al-test-res');
+  res.textContent = 'Enviando…';
+  try {
+    const r = await fetch('/api/alert-test', { method: 'POST' });
+    const j = await r.json();
+    res.textContent = j.ok ? 'Mensagem de teste enviada. Confira o WhatsApp.' : 'Falhou: ' + j.detail;
+  } catch (e) { res.textContent = 'Falhou: ' + e; }
+  loadAlerts();
+});
+
 poll();
 pollApps();
+pollAlerts();
 </script>
 </body>
 </html>

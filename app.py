@@ -5,6 +5,8 @@ Lê CPU, memória, disco e rede direto do Linux (/proc e /sys), guarda um
 histórico em memória e serve a página (index.html) e a API (/api/metrics).
 Se o Docker estiver acessível, também mostra CPU, memória e rede de cada
 aplicativo (container) do EasyPanel em /api/apps.
+Se a Evolution API estiver configurada, avisa por WhatsApp quando algo passa
+do limite ou quando um aplicativo para (veja a seção de alertas abaixo).
 Só usa a biblioteca padrão do Python.
 """
 import base64
@@ -16,10 +18,13 @@ import shutil
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 PORT = int(os.getenv("PORT", "8080"))
 INTERVAL = int(os.getenv("SAMPLE_INTERVAL", "5"))      # segundos entre coletas
@@ -323,6 +328,216 @@ def apps_loop():
         time.sleep(max(INTERVAL - (time.time() - t0), 1))
 
 
+# ---------- alertas por WhatsApp (Evolution API) ----------
+def _num(name, default):
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return float(default)
+
+
+EVO_URL = os.getenv("EVOLUTION_URL", "").strip().rstrip("/")
+EVO_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "").strip()
+EVO_KEY = os.getenv("EVOLUTION_APIKEY", "").strip()
+ALERT_NUMBERS = []
+for _n in os.getenv("ALERT_NUMBER", "").split(","):
+    _digits = "".join(ch for ch in _n if ch.isdigit())
+    if _digits:
+        ALERT_NUMBERS.append(_digits)
+ALERTS_ENABLED = bool(EVO_URL and EVO_INSTANCE and EVO_KEY and ALERT_NUMBERS)
+
+# Limites (em %). Use 0 para desligar um alerta.
+THRESHOLDS = {
+    "cpu": _num("ALERT_CPU_PCT", 90),          # CPU da VPS
+    "mem": _num("ALERT_MEM_PCT", 90),          # memória da VPS
+    "disk": _num("ALERT_DISK_PCT", 85),        # disco da VPS
+    "app_cpu": _num("ALERT_APP_CPU_PCT", 90),  # CPU de um app (100 = 1 vCPU inteira)
+    "app_mem": _num("ALERT_APP_MEM_PCT", 90),  # memória de um app, em % do limite dele
+}
+SUSTAIN = _num("ALERT_SUSTAIN_SECONDS", 120)    # quanto tempo o problema precisa durar
+DOWN_AFTER = _num("ALERT_DOWN_SECONDS", 60)     # quanto tempo um app parado precisa durar
+COOLDOWN = _num("ALERT_COOLDOWN_MINUTES", 30) * 60  # intervalo entre lembretes
+LOCAL_TZ = timezone(timedelta(hours=_num("TZ_OFFSET_HOURS", -3)))  # Brasília = -3
+
+alert_lock = threading.RLock()
+alert_state = {}                  # chave do alerta -> estado
+alert_events = deque(maxlen=20)   # últimos envios
+seen_running = set()              # apps que já vimos rodando (só esses geram alerta de "parado")
+
+
+def missing_alert_vars():
+    pairs = [("EVOLUTION_URL", EVO_URL), ("EVOLUTION_INSTANCE", EVO_INSTANCE),
+             ("EVOLUTION_APIKEY", EVO_KEY), ("ALERT_NUMBER", ALERT_NUMBERS)]
+    return [name for name, value in pairs if not value]
+
+
+def hb(b):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if b < 1024 or unit == "TB":
+            return f"{b:.0f} {unit}" if unit in ("B", "KB") else f"{b:.1f} {unit}"
+        b /= 1024
+
+
+def _post_json(url, payload):
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), method="POST",
+        headers={"Content-Type": "application/json", "apikey": EVO_KEY},
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.status
+
+
+def _send_one(url, number, text):
+    # Evolution v2 usa {"number","text"}; a v1 usa {"number","textMessage":{"text"}}.
+    # Só tentamos o formato antigo se o novo for recusado com 400.
+    bodies = ({"number": number, "text": text},
+              {"number": number, "textMessage": {"text": text}})
+    last = ""
+    for body in bodies:
+        try:
+            _post_json(url, body)
+            return True, "ok"
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code}: {e.read()[:150].decode(errors='replace')}"
+            if e.code != 400:
+                break
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+    return False, last
+
+
+def send_whatsapp(text):
+    if not ALERTS_ENABLED:
+        return False, "alertas não configurados (faltam: " + ", ".join(missing_alert_vars()) + ")"
+    url = f"{EVO_URL}/message/sendText/{quote(EVO_INSTANCE)}"
+    problems = []
+    for number in ALERT_NUMBERS:
+        ok, detail = _send_one(url, number, text)
+        if not ok:
+            problems.append(f"final {number[-4:]}: {detail}")
+    return (not problems), ("; ".join(problems) or "enviado")
+
+
+def notify(kind, message):
+    stamp = datetime.now(LOCAL_TZ).strftime("%d/%m %H:%M")
+    ok, detail = send_whatsapp(f"{message}\n🕒 {stamp}")
+    with alert_lock:
+        alert_events.append({
+            "t": int(time.time()), "kind": kind, "ok": ok, "detail": detail,
+            "text": message.replace("\n", " · ")[:180],
+        })
+    return ok, detail
+
+
+def current_conditions():
+    """Devolve (problemas_atuais, dados_de_apps_validos, apps_rodando)."""
+    conds = {}   # chave -> (texto do alerta, texto de normalizado)
+    with lock:
+        n = dict(latest)
+    if n:
+        if THRESHOLDS["cpu"] > 0 and n["cpu"] >= THRESHOLDS["cpu"]:
+            conds["host-cpu"] = (f"CPU da VPS em {n['cpu']:.0f}% (limite {THRESHOLDS['cpu']:.0f}%)",
+                                 "CPU da VPS voltou ao normal")
+        if THRESHOLDS["mem"] > 0 and n["mem"] >= THRESHOLDS["mem"]:
+            conds["host-mem"] = (f"Memória da VPS em {n['mem']:.0f}% ({hb(n['mem_used'])} de {hb(n['mem_total'])})",
+                                 "Memória da VPS voltou ao normal")
+        disk_pct = 100.0 * n["disk_used"] / n["disk_total"]
+        if THRESHOLDS["disk"] > 0 and disk_pct >= THRESHOLDS["disk"]:
+            conds["host-disk"] = (f"Disco da VPS em {disk_pct:.0f}% ({hb(n['disk_used'])} de {hb(n['disk_total'])})",
+                                  "Disco da VPS voltou ao normal")
+
+    apps_ok = False
+    running_keys = set()
+    if DOCKER_ENABLED:
+        with apps_lock:
+            snap = dict(apps_state)
+        if snap["t"] and not snap["error"]:
+            apps_ok = True
+            for a in snap["apps"]:
+                name = f"{a['project']}/{a['service']}" if a["project"] else a["service"]
+                if a["state"] == "running":
+                    running_keys.add(a["key"])
+                    seen_running.add(a["key"])
+                    if THRESHOLDS["app_cpu"] > 0 and a["cpu"] >= THRESHOLDS["app_cpu"]:
+                        conds[f"app-cpu:{a['key']}"] = (
+                            f"App {name} usando {a['cpu']:.0f}% de CPU (100% = 1 vCPU)",
+                            f"CPU do app {name} voltou ao normal")
+                    if THRESHOLDS["app_mem"] > 0 and a["mem_limit"]:
+                        pct = 100.0 * a["mem_used"] / a["mem_limit"]
+                        if pct >= THRESHOLDS["app_mem"]:
+                            conds[f"app-mem:{a['key']}"] = (
+                                f"App {name} usando {pct:.0f}% do limite de memória "
+                                f"({hb(a['mem_used'])} de {hb(a['mem_limit'])})",
+                                f"Memória do app {name} voltou ao normal")
+                elif a["key"] in seen_running:
+                    conds[f"app-down:{a['key']}"] = (
+                        f"App {name} parou ({a['status'] or a['state']})",
+                        f"App {name} voltou a rodar")
+    return conds, apps_ok, running_keys
+
+
+def process_alerts(conds, apps_ok, running_keys, now):
+    """Atualiza o estado dos alertas e devolve as mensagens a enviar."""
+    outbox = []
+    for key, (text, ok_text) in conds.items():
+        st = alert_state.setdefault(key, {"since": now, "fired": False, "last": 0.0})
+        st["text"], st["ok_text"] = text, ok_text
+        need = DOWN_AFTER if key.startswith("app-down:") else SUSTAIN
+        if not st["fired"] and now - st["since"] >= need:
+            outbox.append(("alerta", f"🚨 *Alerta · {HOST_LABEL}*\n{text}"))
+            st["fired"], st["last"] = True, now
+        elif st["fired"] and now - st["last"] >= COOLDOWN:
+            outbox.append(("lembrete", f"⚠️ *Continua em alerta · {HOST_LABEL}*\n{text}"))
+            st["last"] = now
+    for key in list(alert_state):
+        if key in conds:
+            continue
+        is_app = key.startswith("app-")
+        if is_app and not apps_ok:
+            continue  # Docker indisponível agora: não dá para saber, mantém como está
+        st = alert_state.pop(key)
+        if not st["fired"]:
+            continue
+        if is_app and key.split(":", 1)[1] not in running_keys:
+            continue  # o app sumiu da lista (removido de propósito): não avisa "normalizado"
+        outbox.append(("normalizado", f"✅ *Normalizado · {HOST_LABEL}*\n{st['ok_text']}"))
+    return outbox
+
+
+def alerts_loop():
+    time.sleep(INTERVAL * 3)  # espera as primeiras coletas
+    while True:
+        t0 = time.time()
+        try:
+            conds, apps_ok, running_keys = current_conditions()
+            with alert_lock:
+                outbox = process_alerts(conds, apps_ok, running_keys, t0)
+            for kind, message in outbox:
+                notify(kind, message)
+        except Exception as e:
+            print(f"erro no verificador de alertas: {type(e).__name__}: {e}", flush=True)
+        time.sleep(max(INTERVAL - (time.time() - t0), 1))
+
+
+def alerts_snapshot():
+    with alert_lock:
+        active = [{"key": k, "text": s.get("text", ""), "since": int(s["since"]), "fired": s["fired"]}
+                  for k, s in alert_state.items()]
+        events = list(alert_events)[::-1]
+    return {
+        "enabled": ALERTS_ENABLED,
+        "missing": missing_alert_vars(),
+        "numbers": ["final " + n[-4:] for n in ALERT_NUMBERS],
+        "docker": DOCKER_ENABLED,
+        "thresholds": THRESHOLDS,
+        "sustain": SUSTAIN,
+        "down_after": DOWN_AFTER,
+        "cooldown": COOLDOWN,
+        "active": active,
+        "events": events,
+    }
+
+
 # ---------- servidor HTTP ----------
 class Handler(BaseHTTPRequestHandler):
     server_version = "VPSMonitor/1.0"
@@ -381,6 +596,27 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.dumps(apps_state).encode()
             return self._send(200, payload, "application/json")
 
+        if url.path == "/api/alerts":
+            return self._send(200, json.dumps(alerts_snapshot()).encode(), "application/json")
+
+        self._send(404, b"Nao encontrado", "text/plain; charset=utf-8")
+
+    def do_POST(self):
+        url = urlparse(self.path)
+        if not self._authorized():
+            return self._send(
+                401, b"Acesso restrito", "text/plain; charset=utf-8",
+                {"WWW-Authenticate": 'Basic realm="Monitor VPS"'},
+            )
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(min(length, 65536))
+
+        if url.path == "/api/alert-test":
+            ok, detail = notify(
+                "teste", f"✅ *Teste · {HOST_LABEL}*\nO monitor consegue enviar mensagens por aqui.")
+            return self._send(200, json.dumps({"ok": ok, "detail": detail}).encode(), "application/json")
+
         self._send(404, b"Nao encontrado", "text/plain; charset=utf-8")
 
 
@@ -388,6 +624,11 @@ if __name__ == "__main__":
     threading.Thread(target=sampler, daemon=True).start()
     if DOCKER_ENABLED:
         threading.Thread(target=apps_loop, daemon=True).start()
+    if ALERTS_ENABLED:
+        threading.Thread(target=alerts_loop, daemon=True).start()
+        print(f"Alertas por WhatsApp ativos para {len(ALERT_NUMBERS)} numero(s)", flush=True)
+    else:
+        print("Alertas por WhatsApp desativados (faltam: " + ", ".join(missing_alert_vars()) + ")", flush=True)
     print(f"Monitor rodando na porta {PORT} (coleta a cada {INTERVAL}s)", flush=True)
     print(f"Docker: {DOCKER_HOST or 'nao configurado (tabela de aplicativos desativada)'}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
